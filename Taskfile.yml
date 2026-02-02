@@ -1,0 +1,50 @@
+version: '3'
+
+vars:
+  SERVICE_NAME: gateway
+  GOBIN: $(pwd)/bin
+  GOLANGCI_LINT_VERSION: v2.5
+
+tasks:
+  default:
+    cmds:
+      - task: fmt
+      - task: lint
+      - task: build
+
+  install-tools:
+    desc: install development tools
+    cmds:
+      - GOBIN={{ .GOBIN }} go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@{{ .GOLANGCI_LINT_VERSION }}
+    silent: true
+
+  fmt:
+    desc: format code
+    cmds:
+      - gofmt -w -l .
+
+  lint:
+    desc: lint code with golangci-lint
+    deps: [install-tools]
+    cmds:
+      - "{{ .GOBIN }}/golangci-lint run --timeout 5m ./..."
+
+  build:
+    desc: build the application
+    cmds:
+      - go build -o ./bin/{{ .SERVICE_NAME }} ./cmd/app
+
+  run:
+    desc: run the application
+    cmds:
+      - go run ./cmd/app
+
+  test:
+    desc: run tests
+    cmds:
+      - go test -race ./...
+
+  mock:
+    desc: run mock Order Service
+    cmds:
+      - go run ./cmd/mock
