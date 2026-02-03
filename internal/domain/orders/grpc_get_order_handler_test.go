@@ -2,215 +2,236 @@ package orders
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"connectrpc.com/connect"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	orderv1 "github.com/demo/contracts/gen/go/order/v1"
 )
 
-func TestGetOrderHandler_Validation(t *testing.T) {
-	tests := []struct {
-		name    string
-		request *orderv1.GetOrderRequest
-	}{
+func TestGetOrderHandler(t *testing.T) {
+	// Define testData struct locally - Gateway specific
+	type testData struct {
+		ctx      context.Context
+		t        *testing.T
+		handler  *getOrderHandler
+		client   *mockOrderServiceClient
+		request  *connect.Request[orderv1.GetOrderRequest]
+		response *connect.Response[orderv1.GetOrderResponse]
+		err      error
+	}
+
+	// Define testCase struct locally - GWT pattern is MANDATORY
+	type testCase struct {
+		name  string
+		given func(*testData)
+		when  func(*testData)
+		then  func(*testData)
+	}
+
+	// Setup function creates isolated test data for each test case
+	setupTestData := func(t *testing.T) *testData {
+		client := &mockOrderServiceClient{}
+
+		// Setup default mock behavior for CheckOrderOwner (success)
+		client.checkOrderOwnerFunc = func(ctx context.Context, req *connect.Request[orderv1.CheckOrderOwnerRequest]) (*connect.Response[orderv1.CheckOrderOwnerResponse], error) {
+			return connect.NewResponse(&orderv1.CheckOrderOwnerResponse{}), nil
+		}
+
+		// Setup default mock behavior for GetOrder (success)
+		client.getOrderFunc = func(ctx context.Context, req *connect.Request[orderv1.GetOrderRequest]) (*connect.Response[orderv1.GetOrderResponse], error) {
+			return connect.NewResponse(&orderv1.GetOrderResponse{
+				Order: &orderv1.Order{
+					Id:     req.Msg.Id,
+					UserId: req.Msg.UserId,
+					Item:   "Test Item",
+					Amount: 100.50,
+					Status: "created",
+				},
+			}), nil
+		}
+
+		handler := newGetOrderHandler(client)
+
+		return &testData{
+			ctx:     context.Background(),
+			t:       t,
+			handler: handler,
+			client:  client,
+		}
+	}
+
+	testCases := []testCase{
+		// Success scenario
 		{
-			name: "validation_error_empty_id",
-			request: &orderv1.GetOrderRequest{
-				Id:     "",
-				UserId: "user-123",
+			name: "Should proxy request to backend successfully",
+			given: func(td *testData) {
+				td.request = connect.NewRequest(&orderv1.GetOrderRequest{
+					Id:     "order-123",
+					UserId: "user-456",
+				})
+			},
+			when: func(td *testData) {
+				td.response, td.err = td.handler.Handle(td.ctx, td.request)
+			},
+			then: func(td *testData) {
+				require.NoError(td.t, td.err)
+				require.NotNil(td.t, td.response)
+				require.NotNil(td.t, td.response.Msg.Order)
+				assert.Equal(td.t, "order-123", td.response.Msg.Order.Id)
+				assert.Equal(td.t, "user-456", td.response.Msg.Order.UserId)
+				assert.Equal(td.t, "Test Item", td.response.Msg.Order.Item)
+			},
+		},
+
+		// Validation errors
+		{
+			name: "Should return InvalidArgument when id is empty",
+			given: func(td *testData) {
+				td.request = connect.NewRequest(&orderv1.GetOrderRequest{
+					Id:     "",
+					UserId: "user-456",
+				})
+			},
+			when: func(td *testData) {
+				td.response, td.err = td.handler.Handle(td.ctx, td.request)
+			},
+			then: func(td *testData) {
+				require.Error(td.t, td.err)
+				assert.Equal(td.t, connect.CodeInvalidArgument, connect.CodeOf(td.err))
+				assert.Nil(td.t, td.response)
 			},
 		},
 		{
-			name: "validation_error_empty_user_id",
-			request: &orderv1.GetOrderRequest{
-				Id:     "order-123",
-				UserId: "",
+			name: "Should return InvalidArgument when user_id is empty",
+			given: func(td *testData) {
+				td.request = connect.NewRequest(&orderv1.GetOrderRequest{
+					Id:     "order-123",
+					UserId: "",
+				})
+			},
+			when: func(td *testData) {
+				td.response, td.err = td.handler.Handle(td.ctx, td.request)
+			},
+			then: func(td *testData) {
+				require.Error(td.t, td.err)
+				assert.Equal(td.t, connect.CodeInvalidArgument, connect.CodeOf(td.err))
+				assert.Nil(td.t, td.response)
+			},
+		},
+		{
+			name: "Should return InvalidArgument when both id and user_id are empty",
+			given: func(td *testData) {
+				td.request = connect.NewRequest(&orderv1.GetOrderRequest{
+					Id:     "",
+					UserId: "",
+				})
+			},
+			when: func(td *testData) {
+				td.response, td.err = td.handler.Handle(td.ctx, td.request)
+			},
+			then: func(td *testData) {
+				require.Error(td.t, td.err)
+				assert.Equal(td.t, connect.CodeInvalidArgument, connect.CodeOf(td.err))
+				assert.Nil(td.t, td.response)
+			},
+		},
+
+		// CheckOrderOwner error scenarios
+		{
+			name: "Should propagate CheckOrderOwner NotFound error",
+			given: func(td *testData) {
+				td.request = connect.NewRequest(&orderv1.GetOrderRequest{
+					Id:     "order-123",
+					UserId: "user-456",
+				})
+				td.client.checkOrderOwnerFunc = func(ctx context.Context, req *connect.Request[orderv1.CheckOrderOwnerRequest]) (*connect.Response[orderv1.CheckOrderOwnerResponse], error) {
+					return nil, connect.NewError(connect.CodeNotFound, errors.New("order not found"))
+				}
+			},
+			when: func(td *testData) {
+				td.response, td.err = td.handler.Handle(td.ctx, td.request)
+			},
+			then: func(td *testData) {
+				require.Error(td.t, td.err)
+				assert.Equal(td.t, connect.CodeNotFound, connect.CodeOf(td.err))
+				assert.Nil(td.t, td.response)
+			},
+		},
+		{
+			name: "Should propagate CheckOrderOwner PermissionDenied error",
+			given: func(td *testData) {
+				td.request = connect.NewRequest(&orderv1.GetOrderRequest{
+					Id:     "order-123",
+					UserId: "user-456",
+				})
+				td.client.checkOrderOwnerFunc = func(ctx context.Context, req *connect.Request[orderv1.CheckOrderOwnerRequest]) (*connect.Response[orderv1.CheckOrderOwnerResponse], error) {
+					return nil, connect.NewError(connect.CodePermissionDenied, errors.New("user is not the owner"))
+				}
+			},
+			when: func(td *testData) {
+				td.response, td.err = td.handler.Handle(td.ctx, td.request)
+			},
+			then: func(td *testData) {
+				require.Error(td.t, td.err)
+				assert.Equal(td.t, connect.CodePermissionDenied, connect.CodeOf(td.err))
+				assert.Nil(td.t, td.response)
+			},
+		},
+
+		// GetOrder backend error scenarios
+		{
+			name: "Should propagate GetOrder NotFound error",
+			given: func(td *testData) {
+				td.request = connect.NewRequest(&orderv1.GetOrderRequest{
+					Id:     "order-123",
+					UserId: "user-456",
+				})
+				td.client.getOrderFunc = func(ctx context.Context, req *connect.Request[orderv1.GetOrderRequest]) (*connect.Response[orderv1.GetOrderResponse], error) {
+					return nil, connect.NewError(connect.CodeNotFound, errors.New("order not found"))
+				}
+			},
+			when: func(td *testData) {
+				td.response, td.err = td.handler.Handle(td.ctx, td.request)
+			},
+			then: func(td *testData) {
+				require.Error(td.t, td.err)
+				assert.Equal(td.t, connect.CodeNotFound, connect.CodeOf(td.err))
+				assert.Nil(td.t, td.response)
+			},
+		},
+		{
+			name: "Should propagate GetOrder Internal error",
+			given: func(td *testData) {
+				td.request = connect.NewRequest(&orderv1.GetOrderRequest{
+					Id:     "order-123",
+					UserId: "user-456",
+				})
+				td.client.getOrderFunc = func(ctx context.Context, req *connect.Request[orderv1.GetOrderRequest]) (*connect.Response[orderv1.GetOrderResponse], error) {
+					return nil, connect.NewError(connect.CodeInternal, errors.New("database error"))
+				}
+			},
+			when: func(td *testData) {
+				td.response, td.err = td.handler.Handle(td.ctx, td.request)
+			},
+			then: func(td *testData) {
+				require.Error(td.t, td.err)
+				assert.Equal(td.t, connect.CodeInternal, connect.CodeOf(td.err))
+				assert.Nil(td.t, td.response)
 			},
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			checkOwnerCalled := false
-			getOrderCalled := false
-
-			mockClient := &mockOrderServiceClient{
-				checkOrderOwnerFunc: func(ctx context.Context, req *connect.Request[orderv1.CheckOrderOwnerRequest]) (*connect.Response[orderv1.CheckOrderOwnerResponse], error) {
-					checkOwnerCalled = true
-					return connect.NewResponse(&orderv1.CheckOrderOwnerResponse{}), nil
-				},
-				getOrderFunc: func(ctx context.Context, req *connect.Request[orderv1.GetOrderRequest]) (*connect.Response[orderv1.GetOrderResponse], error) {
-					getOrderCalled = true
-					return connect.NewResponse(&orderv1.GetOrderResponse{}), nil
-				},
-			}
-
-			handler := newGetOrderHandler(mockClient)
-			_, err := handler.Handle(context.Background(), connect.NewRequest(tt.request))
-
-			if err == nil {
-				t.Fatal("expected error, got nil")
-			}
-
-			connectErr, ok := err.(*connect.Error)
-			if !ok {
-				t.Fatalf("expected connect.Error, got %T", err)
-			}
-
-			if connectErr.Code() != connect.CodeInvalidArgument {
-				t.Errorf("expected InvalidArgument, got %v", connectErr.Code())
-			}
-
-			if checkOwnerCalled {
-				t.Error("CheckOrderOwner should not be called on validation error")
-			}
-
-			if getOrderCalled {
-				t.Error("GetOrder should not be called on validation error")
-			}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			td := setupTestData(t)
+			td.t = t
+			tc.given(td)
+			tc.when(td)
+			tc.then(td)
 		})
 	}
-}
-
-func TestGetOrderHandler_CheckOwnerErrors(t *testing.T) {
-	tests := []struct {
-		name         string
-		ownerError   *connect.Error
-		expectedCode connect.Code
-	}{
-		{
-			name:         "check_owner_permission_denied",
-			ownerError:   connect.NewError(connect.CodePermissionDenied, nil),
-			expectedCode: connect.CodePermissionDenied,
-		},
-		{
-			name:         "check_owner_not_found",
-			ownerError:   connect.NewError(connect.CodeNotFound, nil),
-			expectedCode: connect.CodeNotFound,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			getOrderCalled := false
-
-			mockClient := &mockOrderServiceClient{
-				checkOrderOwnerFunc: func(ctx context.Context, req *connect.Request[orderv1.CheckOrderOwnerRequest]) (*connect.Response[orderv1.CheckOrderOwnerResponse], error) {
-					return nil, tt.ownerError
-				},
-				getOrderFunc: func(ctx context.Context, req *connect.Request[orderv1.GetOrderRequest]) (*connect.Response[orderv1.GetOrderResponse], error) {
-					getOrderCalled = true
-					return connect.NewResponse(&orderv1.GetOrderResponse{}), nil
-				},
-			}
-
-			handler := newGetOrderHandler(mockClient)
-			_, err := handler.Handle(context.Background(), connect.NewRequest(&orderv1.GetOrderRequest{
-				Id:     "order-123",
-				UserId: "user-123",
-			}))
-
-			if err == nil {
-				t.Fatal("expected error, got nil")
-			}
-
-			connectErr, ok := err.(*connect.Error)
-			if !ok {
-				t.Fatalf("expected connect.Error, got %T", err)
-			}
-
-			if connectErr.Code() != tt.expectedCode {
-				t.Errorf("expected %v, got %v", tt.expectedCode, connectErr.Code())
-			}
-
-			if getOrderCalled {
-				t.Error("GetOrder should not be called when CheckOrderOwner fails")
-			}
-		})
-	}
-}
-
-func TestGetOrderHandler_GetOrderError(t *testing.T) {
-	t.Run("get_order_internal_error", func(t *testing.T) {
-		checkOwnerCalled := false
-
-		mockClient := &mockOrderServiceClient{
-			checkOrderOwnerFunc: func(ctx context.Context, req *connect.Request[orderv1.CheckOrderOwnerRequest]) (*connect.Response[orderv1.CheckOrderOwnerResponse], error) {
-				checkOwnerCalled = true
-				return connect.NewResponse(&orderv1.CheckOrderOwnerResponse{}), nil
-			},
-			getOrderFunc: func(ctx context.Context, req *connect.Request[orderv1.GetOrderRequest]) (*connect.Response[orderv1.GetOrderResponse], error) {
-				return nil, connect.NewError(connect.CodeInternal, nil)
-			},
-		}
-
-		handler := newGetOrderHandler(mockClient)
-		_, err := handler.Handle(context.Background(), connect.NewRequest(&orderv1.GetOrderRequest{
-			Id:     "order-123",
-			UserId: "user-123",
-		}))
-
-		if err == nil {
-			t.Fatal("expected error, got nil")
-		}
-
-		if !checkOwnerCalled {
-			t.Error("CheckOrderOwner should be called before GetOrder")
-		}
-
-		connectErr, ok := err.(*connect.Error)
-		if !ok {
-			t.Fatalf("expected connect.Error, got %T", err)
-		}
-
-		if connectErr.Code() != connect.CodeInternal {
-			t.Errorf("expected Internal, got %v", connectErr.Code())
-		}
-	})
-}
-
-func TestGetOrderHandler_CallOrder(t *testing.T) {
-	t.Run("call_order_verification", func(t *testing.T) {
-		var callSequence []string
-
-		mockClient := &mockOrderServiceClient{
-			checkOrderOwnerFunc: func(ctx context.Context, req *connect.Request[orderv1.CheckOrderOwnerRequest]) (*connect.Response[orderv1.CheckOrderOwnerResponse], error) {
-				callSequence = append(callSequence, "CheckOrderOwner")
-				return connect.NewResponse(&orderv1.CheckOrderOwnerResponse{}), nil
-			},
-			getOrderFunc: func(ctx context.Context, req *connect.Request[orderv1.GetOrderRequest]) (*connect.Response[orderv1.GetOrderResponse], error) {
-				callSequence = append(callSequence, "GetOrder")
-				return connect.NewResponse(&orderv1.GetOrderResponse{
-					Order: &orderv1.Order{
-						Id:     "order-123",
-						UserId: "user-123",
-						Item:   "test-item",
-						Amount: 100,
-					},
-				}), nil
-			},
-		}
-
-		handler := newGetOrderHandler(mockClient)
-		_, err := handler.Handle(context.Background(), connect.NewRequest(&orderv1.GetOrderRequest{
-			Id:     "order-123",
-			UserId: "user-123",
-		}))
-
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		if len(callSequence) != 2 {
-			t.Fatalf("expected 2 calls, got %d", len(callSequence))
-		}
-
-		if callSequence[0] != "CheckOrderOwner" {
-			t.Errorf("expected first call to be CheckOrderOwner, got %s", callSequence[0])
-		}
-
-		if callSequence[1] != "GetOrder" {
-			t.Errorf("expected second call to be GetOrder, got %s", callSequence[1])
-		}
-	})
 }

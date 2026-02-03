@@ -10,12 +10,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Agents for Testing
 
-**Always use `gateway-test-coordinator`** to write tests — it distributes work between unit and isolation agents in parallel, avoiding duplication.
+⚠️ **ЗАПРЕЩЕНО писать тесты напрямую. ВСЕГДА используй агента через Task tool.**
+
+Когда нужно написать тесты:
+1. **СТОП** — не пиши тест-код сам
+2. **Используй Task tool** с `subagent_type: "gateway-unit-test-writer"` или `"gateway-test-coordinator"`
+3. Агент знает все паттерны проекта (testify, GWT, connect.CodeOf и т.д.)
 
 Available agents:
-- **`gateway-test-coordinator`** — **USE THIS** for writing tests (delegates to agents below)
-- **`gateway-unit-test-writer`** - for unit tests (validation, business logic, error handling with mocks)
-- **`gateway-isolation-test-writer`** - for end-to-end integration tests (full flows with real infrastructure)
+- **`gateway-test-coordinator`** — для комплексного покрытия (распределяет между unit и isolation)
+- **`gateway-unit-test-writer`** — для unit тестов (validation, mocks, error handling)
+- **`gateway-isolation-test-writer`** — для e2e тестов (full flows with real infrastructure)
 
 ## Build and Run
 
